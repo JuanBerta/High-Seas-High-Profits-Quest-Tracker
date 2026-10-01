@@ -16,7 +16,7 @@ using Goods_Tracker;
 [assembly: AssemblyCopyright("Copyright ©  2026")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
-[assembly: MelonInfo(typeof(GoodsTrackerClass), "Goods Tracker", "1.0.1", "Beinded")]
+[assembly: MelonInfo(typeof(GoodsTrackerClass), "Goods Tracker", "1.0.2", "Beinded")]
 
 // Setting ComVisible to false makes the types in this assembly not visible
 // to COM components.  If you need to access a type in this assembly from
