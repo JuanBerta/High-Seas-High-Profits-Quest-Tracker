@@ -49,7 +49,19 @@ namespace Goods_Tracker
 
                 ChangeShipInventoryTracking(holder, ___itemContainer);
 
-                // FIX: Find ALL quest items in the UI and update their buttons
+                // FIX: Find ALL quest items in the UI and update their buttons (scene scan: at most twice a second)
+                if (Time.unscaledTime - _lastQuestButtonScan >= 0.5f)
+                {
+                    _lastQuestButtonScan = Time.unscaledTime;
+                    RefreshQuestButtons();
+                }
+                QuestTrackerState.UpdateLabel(gameState, orchestration);
+            }
+
+            private static float _lastQuestButtonScan;
+
+            private static void RefreshQuestButtons()
+            {
                 var allQuestItems = GameObject.FindObjectsOfType<TownHallQuestListItem>();
                 foreach (var item in allQuestItems)
                 {
@@ -63,7 +75,6 @@ namespace Goods_Tracker
                         if (quest != null) SetTrackUntrackButtonText(trackBtnText, quest);
                     }
                 }
-                QuestTrackerState.UpdateLabel(gameState, orchestration);
             }
         }
 
@@ -82,7 +93,7 @@ namespace Goods_Tracker
         {
             public static void Postfix(GameState __instance, Dictionary<string, object> data)
             {
-                QuestTrackerState.LoadQuests();
+                QuestTrackerState.LoadQuests(__instance);
 
                 QuestTrackerState.UpdateLabel(__instance, GetOrchestration());
             }
@@ -113,14 +124,20 @@ namespace Goods_Tracker
             }
         }
 
+        // Cached: these lookups run on every inventory item update, and Find*/FindObjectOfType scan the whole scene.
+        private static OrchestrationUI _orchestrationCache;
+
         static OrchestrationUI GetOrchestration()
         {
-            var orchestration = GameObject.FindObjectOfType<OrchestrationUI>();
-            return orchestration;
+            if (_orchestrationCache == null) _orchestrationCache = GameObject.FindObjectOfType<OrchestrationUI>();
+            return _orchestrationCache;
         }
 
         static GameState GetGameState()
         {
+            var cached = InstanceProvider.GetInstance<GameState>();
+            if (cached != null) return cached;
+
             var mayorQuestTradeConfirmationWindow = UnityEngine.Object.FindObjectOfType<MayorQuestTradeConfirmationWindow>();
             var prop = typeof(zip.lexy.tgame.state.EntityBase).GetProperty("gameState",
                             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
@@ -313,9 +330,19 @@ namespace Goods_Tracker
         {
             public static Dictionary<string, List<MayorQuest>> GroupedQuests = new Dictionary<string, List<MayorQuest>>();
             public static TextMeshProUGUI DisplayLabel;
+            private static int _lastLabelFrame = -1;
             public static RectTransform DisplayLabelRect;
             public static string QuestName;
-            private const string SAVE_KEY = "GoodsTracker_SavedQuests";
+            private const string SAVE_KEY_PREFIX = "GoodsTracker_SavedQuests_";
+
+            // Seed of the game currently loaded. Each game (and every save made from it) has a fixed seed,
+            // so it identifies the save the quests belong to.
+            private static string CurrentSaveKey = null;
+
+            private static string SaveKeyFor(GameState gameState)
+            {
+                return SAVE_KEY_PREFIX + gameState.seed.ToString();
+            }
 
             public static void ToggleQuest(MayorQuest quest, string cityName)
             {
@@ -366,6 +393,9 @@ namespace Goods_Tracker
 
             public static void SaveQuests()
             {
+                // Nothing is saved before a game has been loaded, so quests can't leak into another save
+                if (CurrentSaveKey == null) return;
+
                 HashSet<string> uniqueLines = new HashSet<string>();
 
                 foreach (var entry in GroupedQuests)
@@ -381,16 +411,20 @@ namespace Goods_Tracker
                 }
 
                 string data = string.Join(";", uniqueLines);
-                PlayerPrefs.SetString(SAVE_KEY, data);
+                PlayerPrefs.SetString(CurrentSaveKey, data);
                 PlayerPrefs.Save();
             }
 
-            public static void LoadQuests()
+            public static void LoadQuests(GameState gameState)
             {
-                string data = PlayerPrefs.GetString(SAVE_KEY, "");
+                // Always reset first: quests from the previously loaded save must never carry over
+                GroupedQuests.Clear();
+                CurrentSaveKey = gameState != null ? SaveKeyFor(gameState) : null;
+                if (CurrentSaveKey == null) return;
+
+                string data = PlayerPrefs.GetString(CurrentSaveKey, "");
                 if (string.IsNullOrEmpty(data)) return;
 
-                GroupedQuests.Clear();
                 // Split the different quests
                 string[] rows = data.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries);
 
@@ -401,6 +435,14 @@ namespace Goods_Tracker
                     if (parts.Length < 4) continue;
 
                     string cityName = parts[0];
+
+                    // Drop quests for cities that this save does not contain
+                    if (!CityExists(gameState, cityName))
+                    {
+                        SendMelonLoggerInfoMessage($"[Goods Tracker] Dropped quest for {cityName}: not in this save.");
+                        continue;
+                    }
+
                     string questType = parts[1];
 
                     // The 'achieved' bool is always the last element
@@ -426,6 +468,15 @@ namespace Goods_Tracker
 
                     SendMelonLoggerInfoMessage($"[Goods Tracker] Loaded: {cityName} - {originalArgs} (Achieved: {isAchieved})");
                 }
+
+                // Persist the pruned list so removed cities don't come back on the next load
+                SaveQuests();
+            }
+
+            private static bool CityExists(GameState gameState, string cityName)
+            {
+                if (gameState?.cities == null) return false;
+                return gameState.cities.Any(c => c != null && c.name == cityName);
             }
 
             public static bool IsTracked(MayorQuest quest)
@@ -440,7 +491,12 @@ namespace Goods_Tracker
                 {
                     gameState = GetGameState();
                 }
-                GameObject labelObj = GameObject.Find("QuestTrackerLabel");
+                // Once per frame is plenty: every inventory item triggers this call
+                if (_lastLabelFrame == Time.frameCount) return;
+                _lastLabelFrame = Time.frameCount;
+
+                if (orchestration == null) return;
+                GameObject labelObj = DisplayLabel != null ? DisplayLabel.gameObject : null;
                 if (labelObj == null)
                 {
                     labelObj = new GameObject("QuestTrackerLabel");
@@ -465,7 +521,7 @@ namespace Goods_Tracker
 
                 if (GroupedQuests.Count == 0)
                 {
-                    DisplayLabel.text = "";
+                    if (DisplayLabel.text != "") DisplayLabel.text = "";
                     return;
                 }
 
@@ -480,7 +536,7 @@ namespace Goods_Tracker
                         fullText += FormatQuestText(q.args) + "\n";
                     }
                 }
-                DisplayLabel.text = fullText;
+                if (DisplayLabel.text != fullText) DisplayLabel.text = fullText;
             }
 
             public static string FormatQuestText(string args)
